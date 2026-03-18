@@ -32,7 +32,7 @@ from lerobot.utils.visualization_utils import init_rerun
 NUM_EPISODES = 50
 FPS = 30
 EPISODE_TIME_SEC = 20
-RESET_TIME_SEC = 10
+RESET_TIME_SEC = 20
 TASK_DESCRIPTION = "Go towards a green block, no obstacles"
 HF_REPO_ID = os.environ.get("HF_REPO_ID")
 REMOTE_IP = os.environ.get("REMOTE_IP")
