@@ -16,18 +16,18 @@
 
 import os
 import sys
+import time
 
-from lerobot.datasets.feature_utils import hw_to_dataset_features
+from lerobot.datasets.feature_utils import build_dataset_frame, hw_to_dataset_features
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
-from lerobot.processor import make_default_processors
 from lerobot.robots.lekiwi.config_lekiwi import LeKiwiClientConfig
 from lerobot.robots.lekiwi.lekiwi_client import LeKiwiClient
-from lerobot.scripts.lerobot_record import record_loop
 from lerobot.teleoperators.keyboard import KeyboardTeleop, KeyboardTeleopConfig
 from lerobot.utils.constants import ACTION, OBS_STR
 from lerobot.utils.control_utils import init_keyboard_listener
+from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.utils import log_say
-from lerobot.utils.visualization_utils import init_rerun
+from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 
 NUM_EPISODES = 50
 FPS = 30
@@ -36,6 +36,56 @@ RESET_TIME_SEC = 20
 TASK_DESCRIPTION = "Go towards a green block, no obstacles"
 HF_REPO_ID = os.environ.get("HF_REPO_ID")
 REMOTE_IP = os.environ.get("REMOTE_IP")
+
+
+def clear_events(events):
+    """Clear all event flags to prevent stale key presses from carrying over."""
+    events["exit_early"] = False
+    events["rerecord_episode"] = False
+
+
+def run_episode(robot, keyboard, events, fps, control_time_s, phase_label="", dataset=None, task=None):
+    """Run one episode: drive the robot with keyboard, optionally saving to dataset."""
+    timestamp = 0
+    start_t = time.perf_counter()
+
+    while timestamp < control_time_s:
+        t0 = time.perf_counter()
+        remaining = int(control_time_s - timestamp)
+
+        if events["exit_early"]:
+            events["exit_early"] = False
+            break
+
+        # Print status every second
+        if int(timestamp * fps) % fps == 0:
+            print(f"\r{phase_label} | Time remaining: {remaining}s", end="", flush=True)
+
+        # Get observation (camera frames + robot state)
+        obs = robot.get_observation()
+
+        # Get keyboard input and convert to velocity commands
+        keyboard_keys = keyboard.get_action()
+        action = robot._from_keyboard_to_base_action(keyboard_keys)
+
+        # Send action to robot
+        robot.send_action(action)
+
+        # Save frame to dataset
+        if dataset is not None:
+            obs_frame = build_dataset_frame(dataset.features, obs, prefix=OBS_STR)
+            action_frame = build_dataset_frame(dataset.features, action, prefix=ACTION)
+            frame = {**obs_frame, **action_frame, "task": task}
+            dataset.add_frame(frame)
+
+        # Visualize
+        log_rerun_data(observation=obs, action=action)
+
+        dt_s = time.perf_counter() - t0
+        precise_sleep(max(1.0 / fps - dt_s, 0.0))
+        timestamp = time.perf_counter() - start_t
+
+    print()  # newline after the status line
 
 
 def main():
@@ -51,9 +101,6 @@ def main():
     # Initialize the robot and teleoperator
     robot = LeKiwiClient(robot_config)
     keyboard = KeyboardTeleop(keyboard_config)
-
-    # TODO(Steven): Update this example to use pipelines
-    teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
 
     # Configure the dataset features
     action_features = hw_to_dataset_features(robot.action_features, ACTION)
@@ -71,7 +118,6 @@ def main():
     )
 
     # Connect the robot and teleoperator
-    # To connect you already should have this script running on LeKiwi: `python -m lerobot.robots.lekiwi.lekiwi_host --robot.id=my_awesome_kiwi`
     robot.connect()
     keyboard.connect()
 
@@ -83,46 +129,34 @@ def main():
         if not robot.is_connected or not keyboard.is_connected:
             raise ValueError("Robot or teleop is not connected!")
 
-        print("Starting record loop...")
+        print(f"Starting recording: {NUM_EPISODES} episodes, {EPISODE_TIME_SEC}s each")
+        print("Controls: W/A/S/D to drive, Right arrow = end episode, Left arrow = re-record, ESC = stop all")
+        print("=" * 60)
+
         recorded_episodes = 0
         while recorded_episodes < NUM_EPISODES and not events["stop_recording"]:
-            log_say(f"Recording episode {recorded_episodes}")
+            clear_events(events)
+            print(f"\n>>> RECORDING episode {recorded_episodes + 1}/{NUM_EPISODES} — drive toward the green block!")
+            time.sleep(1)  # brief pause so you can read the message
 
-            # Main record loop
-            record_loop(
+            # Record episode
+            run_episode(
                 robot=robot,
+                keyboard=keyboard,
                 events=events,
                 fps=FPS,
-                dataset=dataset,
-                teleop=[keyboard],
                 control_time_s=EPISODE_TIME_SEC,
-                single_task=TASK_DESCRIPTION,
-                display_data=True,
-                teleop_action_processor=teleop_action_processor,
-                robot_action_processor=robot_action_processor,
-                robot_observation_processor=robot_observation_processor,
+                phase_label=f"RECORDING ep {recorded_episodes + 1}/{NUM_EPISODES}",
+                dataset=dataset,
+                task=TASK_DESCRIPTION,
             )
 
-            # Reset the environment if not stopping or re-recording
-            if not events["stop_recording"] and (
-                (recorded_episodes < NUM_EPISODES - 1) or events["rerecord_episode"]
-            ):
-                log_say("Reset the environment")
-                record_loop(
-                    robot=robot,
-                    events=events,
-                    fps=FPS,
-                    teleop=[keyboard],
-                    control_time_s=RESET_TIME_SEC,
-                    single_task=TASK_DESCRIPTION,
-                    display_data=True,
-                    teleop_action_processor=teleop_action_processor,
-                    robot_action_processor=robot_action_processor,
-                    robot_observation_processor=robot_observation_processor,
-                )
+            if events["stop_recording"]:
+                break
 
+            # Check for re-record before saving
             if events["rerecord_episode"]:
-                log_say("Re-record episode")
+                print("<<< RE-RECORDING this episode")
                 events["rerecord_episode"] = False
                 events["exit_early"] = False
                 dataset.clear_episode_buffer()
@@ -131,6 +165,23 @@ def main():
             # Save episode
             dataset.save_episode()
             recorded_episodes += 1
+            print(f"<<< Episode {recorded_episodes}/{NUM_EPISODES} saved!")
+
+            # Reset phase (no recording) — skip for last episode
+            if recorded_episodes < NUM_EPISODES and not events["stop_recording"]:
+                clear_events(events)
+                print(f"\n--- RESET PHASE — move the block back, reposition robot. Press right arrow when ready.")
+
+                run_episode(
+                    robot=robot,
+                    keyboard=keyboard,
+                    events=events,
+                    fps=FPS,
+                    control_time_s=RESET_TIME_SEC,
+                    phase_label="RESETTING",
+                )
+
+        print(f"\nDone! Recorded {recorded_episodes} episodes.")
     finally:
         # Clean up
         log_say("Stop recording")
@@ -140,6 +191,7 @@ def main():
 
         dataset.finalize()
         dataset.push_to_hub()
+        print(f"Dataset uploaded to https://huggingface.co/datasets/{HF_REPO_ID}")
 
 
 if __name__ == "__main__":
