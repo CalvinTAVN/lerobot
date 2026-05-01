@@ -50,6 +50,7 @@ def main():
 
     # Initialize the robot and teleoperator
     robot = LeKiwiClient(robot_config)
+    robot.speed_index = 2  # start at fast — slow speed can't strafe (omniwheel friction)
     keyboard = KeyboardTeleop(keyboard_config)
 
     # Connect to the robot and teleoperator

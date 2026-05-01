@@ -135,6 +135,7 @@ def main():
     keyboard_config = KeyboardTeleopConfig()
 
     robot = LeKiwiClient(robot_config)
+    robot.speed_index = 2  # start at fast — slow speed can't strafe (omniwheel friction)
     keyboard = KeyboardTeleop(keyboard_config)
 
     action_features = hw_to_dataset_features(robot.action_features, ACTION)
