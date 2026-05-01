@@ -48,8 +48,12 @@ from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 
 FPS = 30
 REMOTE_IP = os.environ.get("REMOTE_IP")
-IMAGE_SIZE = 84   # model expects 84x84
-CAMERA = "front"  # camera key in observation dict
+IMAGE_SIZE = 84    # model expects 84x84
+CAMERA = "front"   # camera key in observation dict
+
+# Match the speed used during data collection (max speed level)
+MAX_XY_SPEED    = 0.4   # m/s
+MAX_THETA_SPEED = 90.0  # deg/s
 
 STOP_ACTION = {"x.vel": 0.0, "y.vel": 0.0, "theta.vel": 0.0}
 
@@ -144,19 +148,27 @@ def main():
             img = preprocess(frame)
             controls = policy.get_controls(img)
 
-            # Map policy output keys to robot action keys
+            # Map policy output to robot action keys, scaling to match training speed.
+            # The model predicts sign only (neg/zero/pos), so we scale to max speed.
+            def scale_xy(v):
+                return 0.0 if abs(v) < 1e-6 else (MAX_XY_SPEED if v > 0 else -MAX_XY_SPEED)
+
+            def scale_theta(v):
+                return 0.0 if abs(v) < 1e-6 else (MAX_THETA_SPEED if v > 0 else -MAX_THETA_SPEED)
+
             action = {
-                "x.vel":     controls["x_vel"],
-                "y.vel":     controls["y_vel"],
-                "theta.vel": controls["theta_vel"],
+                "x.vel":     scale_xy(controls["x_vel"]),
+                "y.vel":     0.0,
+                "theta.vel": scale_theta(controls["theta_vel"]),
             }
 
             # Send to robot
             robot.send_action(action)
 
-            # Print current action
+            # Print raw model output and scaled action
             print(
-                f"\rx={action['x.vel']:+.1f}  y={action['y.vel']:+.1f}  θ={action['theta.vel']:+.0f}°/s  [SPACE=pause, ESC=stop]",
+                f"\rraw: x={controls['x_vel']:+.1f} θ={controls['theta_vel']:+.0f} | "
+                f"sent: x={action['x.vel']:+.1f} θ={action['theta.vel']:+.0f}°/s  [SPACE=pause, ESC=stop]",
                 end="",
                 flush=True,
             )

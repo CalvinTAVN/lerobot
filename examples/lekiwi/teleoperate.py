@@ -14,6 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+import sys
 import time
 
 from lerobot.robots.lekiwi import LeKiwiClient, LeKiwiClientConfig
@@ -23,10 +25,27 @@ from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 
 FPS = 30
 
+# W/A/S/D for translation, Q/E for rotation
+TELEOP_KEYS = {
+    "forward": "w",
+    "backward": "s",
+    "left": "a",
+    "right": "d",
+    "rotate_left": "q",
+    "rotate_right": "e",
+    "speed_up": "r",
+    "speed_down": "f",
+    "quit": "p",
+}
+
 
 def main():
+    remote_ip = os.environ.get("REMOTE_IP")
+    if not remote_ip:
+        sys.exit("Error: Set REMOTE_IP env var, e.g. export REMOTE_IP=192.168.1.14")
+
     # Create the robot and teleoperator configurations
-    robot_config = LeKiwiClientConfig(remote_ip="10.9.43.242", id="my_lekiwi")
+    robot_config = LeKiwiClientConfig(remote_ip=remote_ip, id="my_lekiwi", teleop_keys=TELEOP_KEYS)
     keyboard_config = KeyboardTeleopConfig(id="my_laptop_keyboard")
 
     # Initialize the robot and teleoperator

@@ -14,6 +14,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""
+Record a LeKiwi dataset locally. Does NOT upload to HuggingFace.
+Use upload_dataset.py to push to the Hub afterwards.
+
+Examples:
+    python examples/lekiwi/record.py --repo-id user/my_dataset --num-episodes 10
+    python examples/lekiwi/record.py --repo-id user/my_dataset --num-episodes 5 --resume
+"""
+
+import argparse
 import os
 import sys
 import time
@@ -29,13 +39,40 @@ from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.utils import log_say
 from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 
-NUM_EPISODES = 50
 FPS = 30
-EPISODE_TIME_SEC = 20
-RESET_TIME_SEC = 20
 TASK_DESCRIPTION = "Go towards a green block, no obstacles"
-HF_REPO_ID = os.environ.get("HF_REPO_ID")
-REMOTE_IP = os.environ.get("REMOTE_IP")
+
+# W/A/S/D for translation, Q/E for rotation
+TELEOP_KEYS = {
+    "forward": "w",
+    "backward": "s",
+    "left": "a",
+    "right": "d",
+    "rotate_left": "q",
+    "rotate_right": "e",
+    "speed_up": "r",
+    "speed_down": "f",
+    "quit": "p",
+}
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Record LeKiwi dataset locally")
+    parser.add_argument("--repo-id", default=os.environ.get("HF_REPO_ID"),
+                        help="Dataset id (e.g. user/dataset_name). Falls back to HF_REPO_ID env var.")
+    parser.add_argument("--remote-ip", default=os.environ.get("REMOTE_IP"),
+                        help="Robot IP. Falls back to REMOTE_IP env var.")
+    parser.add_argument("--num-episodes", type=int, default=50,
+                        help="Number of episodes to record (default: 50)")
+    parser.add_argument("--episode-time", type=int, default=20,
+                        help="Max seconds per episode (default: 20)")
+    parser.add_argument("--reset-time", type=int, default=20,
+                        help="Seconds for reset between episodes (default: 20)")
+    parser.add_argument("--task", default=TASK_DESCRIPTION,
+                        help=f"Task description (default: '{TASK_DESCRIPTION}')")
+    parser.add_argument("--resume", action="store_true",
+                        help="Append episodes to an existing local dataset instead of creating new.")
+    return parser.parse_args()
 
 
 def clear_events(events):
@@ -57,71 +94,75 @@ def run_episode(robot, keyboard, events, fps, control_time_s, phase_label="", da
             events["exit_early"] = False
             break
 
-        # Print status every second
         if int(timestamp * fps) % fps == 0:
             print(f"\r{phase_label} | Time remaining: {remaining}s", end="", flush=True)
 
-        # Get observation (camera frames + robot state)
         obs = robot.get_observation()
 
-        # Get keyboard input and convert to velocity commands
         keyboard_keys = keyboard.get_action()
         action = robot._from_keyboard_to_base_action(keyboard_keys)
 
-        # Send action to robot
         robot.send_action(action)
 
-        # Save frame to dataset
         if dataset is not None:
             obs_frame = build_dataset_frame(dataset.features, obs, prefix=OBS_STR)
             action_frame = build_dataset_frame(dataset.features, action, prefix=ACTION)
             frame = {**obs_frame, **action_frame, "task": task}
             dataset.add_frame(frame)
 
-        # Visualize
         log_rerun_data(observation=obs, action=action)
 
         dt_s = time.perf_counter() - t0
         precise_sleep(max(1.0 / fps - dt_s, 0.0))
         timestamp = time.perf_counter() - start_t
 
-    print()  # newline after the status line
+    print()
 
 
 def main():
-    if not HF_REPO_ID:
-        sys.exit("Error: Set HF_REPO_ID env var, e.g. export HF_REPO_ID=username/dataset_name")
-    if not REMOTE_IP:
-        sys.exit("Error: Set REMOTE_IP env var, e.g. export REMOTE_IP=192.168.1.100")
+    args = parse_args()
 
-    # Create the robot and teleoperator configurations
-    robot_config = LeKiwiClientConfig(remote_ip=REMOTE_IP, id="lekiwi")
+    if not args.repo_id:
+        sys.exit("Error: Pass --repo-id or set HF_REPO_ID env var.")
+    if not args.remote_ip:
+        sys.exit("Error: Pass --remote-ip or set REMOTE_IP env var.")
+
+    robot_config = LeKiwiClientConfig(
+        remote_ip=args.remote_ip,
+        id="lekiwi",
+        teleop_keys=TELEOP_KEYS,
+    )
     keyboard_config = KeyboardTeleopConfig()
 
-    # Initialize the robot and teleoperator
     robot = LeKiwiClient(robot_config)
     keyboard = KeyboardTeleop(keyboard_config)
 
-    # Configure the dataset features
     action_features = hw_to_dataset_features(robot.action_features, ACTION)
     obs_features = hw_to_dataset_features(robot.observation_features, OBS_STR)
     dataset_features = {**action_features, **obs_features}
 
-    # Create the dataset
-    dataset = LeRobotDataset.create(
-        repo_id=HF_REPO_ID,
-        fps=FPS,
-        features=dataset_features,
-        robot_type=robot.name,
-        use_videos=True,
-        image_writer_threads=4,
-    )
+    if args.resume:
+        print(f"Resuming dataset: {args.repo_id}")
+        dataset = LeRobotDataset(args.repo_id)
+        if hasattr(robot, "cameras") and len(robot.cameras) > 0:
+            dataset.start_image_writer(num_processes=0, num_threads=4 * len(robot.cameras))
+        starting_episodes = dataset.meta.total_episodes
+        print(f"Existing episodes: {starting_episodes}")
+    else:
+        print(f"Creating new dataset: {args.repo_id}")
+        dataset = LeRobotDataset.create(
+            repo_id=args.repo_id,
+            fps=FPS,
+            features=dataset_features,
+            robot_type=robot.name,
+            use_videos=True,
+            image_writer_threads=4,
+        )
+        starting_episodes = 0
 
-    # Connect the robot and teleoperator
     robot.connect()
     keyboard.connect()
 
-    # Initialize the keyboard listener and rerun visualization
     listener, events = init_keyboard_listener()
     init_rerun(session_name="lekiwi_record")
 
@@ -129,32 +170,32 @@ def main():
         if not robot.is_connected or not keyboard.is_connected:
             raise ValueError("Robot or teleop is not connected!")
 
-        print(f"Starting recording: {NUM_EPISODES} episodes, {EPISODE_TIME_SEC}s each")
-        print("Controls: W/A/S/D to drive, Right arrow = end episode, Left arrow = re-record, ESC = stop all")
+        print(f"Starting recording: {args.num_episodes} episodes, {args.episode_time}s each")
+        print("Drive: W/A/S/D (translate), Q/E (rotate), R/F (speed)")
+        print("Recording: Right arrow = end episode, Left arrow = re-record, ESC = stop")
         print("=" * 60)
 
         recorded_episodes = 0
-        while recorded_episodes < NUM_EPISODES and not events["stop_recording"]:
+        while recorded_episodes < args.num_episodes and not events["stop_recording"]:
             clear_events(events)
-            print(f"\n>>> RECORDING episode {recorded_episodes + 1}/{NUM_EPISODES} — drive toward the green block!")
-            time.sleep(1)  # brief pause so you can read the message
+            ep_total = starting_episodes + recorded_episodes + 1
+            print(f"\n>>> RECORDING episode {recorded_episodes + 1}/{args.num_episodes} (dataset total: {ep_total})")
+            time.sleep(1)
 
-            # Record episode
             run_episode(
                 robot=robot,
                 keyboard=keyboard,
                 events=events,
                 fps=FPS,
-                control_time_s=EPISODE_TIME_SEC,
-                phase_label=f"RECORDING ep {recorded_episodes + 1}/{NUM_EPISODES}",
+                control_time_s=args.episode_time,
+                phase_label=f"RECORDING {recorded_episodes + 1}/{args.num_episodes}",
                 dataset=dataset,
-                task=TASK_DESCRIPTION,
+                task=args.task,
             )
 
             if events["stop_recording"]:
                 break
 
-            # Check for re-record before saving
             if events["rerecord_episode"]:
                 print("<<< RE-RECORDING this episode")
                 events["rerecord_episode"] = False
@@ -162,36 +203,35 @@ def main():
                 dataset.clear_episode_buffer()
                 continue
 
-            # Save episode
             dataset.save_episode()
             recorded_episodes += 1
-            print(f"<<< Episode {recorded_episodes}/{NUM_EPISODES} saved!")
+            print(f"<<< Episode {recorded_episodes}/{args.num_episodes} saved!")
 
-            # Reset phase (no recording) — skip for last episode
-            if recorded_episodes < NUM_EPISODES and not events["stop_recording"]:
+            if recorded_episodes < args.num_episodes and not events["stop_recording"]:
                 clear_events(events)
-                print(f"\n--- RESET PHASE — move the block back, reposition robot. Press right arrow when ready.")
+                print(f"\n--- RESET PHASE — reposition. Press right arrow when ready.")
 
                 run_episode(
                     robot=robot,
                     keyboard=keyboard,
                     events=events,
                     fps=FPS,
-                    control_time_s=RESET_TIME_SEC,
+                    control_time_s=args.reset_time,
                     phase_label="RESETTING",
                 )
 
-        print(f"\nDone! Recorded {recorded_episodes} episodes.")
+        print(f"\nDone! Recorded {recorded_episodes} new episodes (dataset total: {starting_episodes + recorded_episodes}).")
     finally:
-        # Clean up
         log_say("Stop recording")
         robot.disconnect()
         keyboard.disconnect()
         listener.stop()
 
         dataset.finalize()
-        dataset.push_to_hub()
-        print(f"Dataset uploaded to https://huggingface.co/datasets/{HF_REPO_ID}")
+        cache_path = dataset.root
+        print(f"\nDataset saved locally at: {cache_path}")
+        print(f"To upload to HuggingFace, run:")
+        print(f"  python examples/lekiwi/upload_dataset.py --repo-id {args.repo_id}")
 
 
 if __name__ == "__main__":
