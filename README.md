@@ -36,6 +36,111 @@ lerobot-info
 > [!IMPORTANT]
 > For detailed installation guide, please see the [Installation Documentation](https://huggingface.co/docs/lerobot/installation).
 
+## LeKiwi setup on a new laptop
+
+This fork contains custom scripts under `examples/lekiwi/` for keyboard teleop, local dataset recording, and running a CNN behavioral-cloning policy on a base-only LeKiwi (no arm, front camera only). The steps below reproduce that workflow on a fresh machine.
+
+### 1. Clone and install
+
+Requires Python 3.12+.
+
+```bash
+git clone <this-repo-url> lerobot
+cd lerobot
+
+python3.12 -m venv .venv
+source .venv/bin/activate
+
+pip install -e ".[lekiwi]"
+```
+
+Log in to Hugging Face once (needed for dataset upload and for pulling datasets that the BC repo uses):
+
+```bash
+huggingface-cli login
+```
+
+### 2. Start the host on the LeKiwi
+
+SSH to the robot and run the host process. It serves observations and accepts commands over ZMQ on ports 5555/5556.
+
+```bash
+# on the robot
+python -m lerobot.robots.lekiwi.lekiwi_host --robot.id=my_awesome_kiwi
+```
+
+Note the robot's IP — you'll point the laptop at it via `REMOTE_IP`.
+
+### 3. Teleoperation
+
+Drive the robot from the laptop with the keyboard. Controls: **W/A/S/D** translate, **Q/E** rotate, **R/F** speed up/down.
+
+```bash
+export REMOTE_IP=192.168.1.14   # your robot's IP
+python examples/lekiwi/teleoperate.py
+```
+
+A rerun viewer opens showing the front camera and live actions. Use this to verify the network link, camera, and drive before recording.
+
+### 4. Recording a dataset
+
+Records episodes locally only — the upload step is separate so you can review before pushing.
+
+```bash
+export REMOTE_IP=192.168.1.14
+export HF_REPO_ID=your-username/your_dataset
+
+python examples/lekiwi/record.py \
+  --num-episodes 10 \
+  --episode-time 20 \
+  --reset-time 20 \
+  --task "Go towards a green block, no obstacles"
+```
+
+During recording: **Right arrow** ends the current episode, **Left arrow** re-records it, **Esc** stops. After each episode there's a reset phase to reposition the robot.
+
+Append more episodes to an existing local dataset:
+
+```bash
+python examples/lekiwi/record.py --num-episodes 5 --resume
+```
+
+Datasets are saved under `~/.cache/huggingface/lerobot/<repo-id>/`. To push to the Hub:
+
+```bash
+python examples/lekiwi/upload_dataset.py --repo-id $HF_REPO_ID
+# add --private and/or --tags lekiwi green-block as needed
+```
+
+### 5. Testing the behavioral-cloning policy
+
+The BC training code lives in a separate repo: [`ECE534_BehaviorCloning`](https://github.com/CalvinTAVN/ECE534_BehaviorCloning). Clone it alongside this one and follow its README to build the dataset and train `cnn_policy.pth`.
+
+```bash
+# in a sibling directory to lerobot/
+git clone https://github.com/CalvinTAVN/ECE534_BehaviorCloning.git
+cd ECE534_BehaviorCloning
+bash setup_venv.sh        # creates rob534/ venv with PyTorch + CUDA
+source rob534/bin/activate
+python dataset/construct_dataset.py
+python models/cnn_train.py
+```
+
+To run the trained policy on the robot, point `BC_REPO` at the BC repo so `run_policy.py` can import `CNNPolicy`:
+
+```bash
+# back in lerobot/, with the lerobot venv activated
+export REMOTE_IP=192.168.1.14
+export BC_REPO=/absolute/path/to/ECE534_BehaviorCloning
+
+python examples/lekiwi/run_policy.py \
+  --model $BC_REPO/models/checkpoints/cnn_policy.pth
+```
+
+Controls while running: **Space** pauses (sends zero velocity), **Esc** is an emergency stop, **Ctrl+C** quits cleanly. The policy outputs discrete sign-only velocities which `run_policy.py` scales to the same max speed used during data collection (0.4 m/s linear, 90°/s rotation).
+
+> The BC repo's venv (`rob534`, has PyTorch+CUDA) and the lerobot venv (`.venv`, has the robot client) are separate. Activate the **lerobot** one when running `run_policy.py` — it imports `CNNPolicy` from the BC repo by path, not by package install.
+
 ## Robots & Control
 
 <div align="center">
